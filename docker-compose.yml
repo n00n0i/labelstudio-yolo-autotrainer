@@ -1,0 +1,96 @@
+version: '3.8'
+
+services:
+  # ============================================
+  # Label Studio
+  # ============================================
+  labelstudio:
+    image: heartexlabs/label-studio:latest
+    container_name: labelstudio
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - LABEL_STUDIO_USERNAME=admin@example.com
+      - LABEL_STUDIO_PASSWORD=admin
+      - LABEL_STUDIO_TOKEN=${LABEL_STUDIO_TOKEN:-}
+    volumes:
+      - ./labelstudio-data:/label-studio/data
+    networks:
+      - labelstudio_yolo_network
+
+  # ============================================
+  # Auto-Trainer Webhook Handler
+  # ============================================
+  auto-trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: auto_trainer
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - LABEL_STUDIO_URL=http://labelstudio:8080
+      - LABEL_STUDIO_TOKEN=${LABEL_STUDIO_TOKEN:-}
+      - TRAINING_THRESHOLD=${TRAINING_THRESHOLD:-100}
+      - DATASET_DIR=/datasets
+      - MODELS_DIR=/models
+    volumes:
+      - ./datasets:/datasets
+      - ./models:/models
+      - /var/run/docker.sock:/var/run/docker.sock  # For running YOLO training
+    networks:
+      - labelstudio_yolo_network
+    depends_on:
+      - labelstudio
+
+  # ============================================
+  # YOLO Training Worker (GPU)
+  # ============================================
+  yolo-worker:
+    build:
+      context: ./yolo-worker
+      dockerfile: Dockerfile
+    container_name: yolo_worker
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ./datasets:/datasets
+      - ./models:/models
+      - ./yolo-worker/scripts:/app/scripts
+    networks:
+      - labelstudio_yolo_network
+    command: ["python3", "-u", "/app/scripts/worker.py"]
+
+  # ============================================
+  # Model Registry (Simple File-based)
+  # ============================================
+  model-registry:
+    image: nginx:alpine
+    container_name: model_registry
+    restart: always
+    ports:
+      - "8081:80"
+    volumes:
+      - ./models:/usr/share/nginx/html/models:ro
+      - ./nginx-registry.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - labelstudio_yolo_network
+
+  # ============================================
+  # Redis (for job queue)
+  # ============================================
+  redis:
+    image: redis:7-alpine
+    container_name: auto_trainer_redis
+    restart: always
+    networks:
+      - labelstudio_yolo_network
+
+networks:
+  labelstudio_yolo_network:
+    driver: bridge
